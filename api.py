@@ -13,6 +13,7 @@ STATE_FILE = os.path.join(PROJECT_DIR, 'state.json')
 PROGRESS_FILE = os.path.join(PROJECT_DIR, 'progress.json')
 CONFIG_FILE = os.path.join(PROJECT_DIR, 'config.json')
 QUEUE_FILE = os.path.join(PROJECT_DIR, 'queue.json')
+LOG_FILE = os.path.join(PROJECT_DIR, 'uploader.log') # লগ ফাইল পাথ যুক্ত করা হলো
 
 class FolderItem(BaseModel):
     name: str
@@ -69,6 +70,19 @@ def stats():
         "queued_files": get_queue_count()
     }
 
+@app.get("/api/logs")
+def get_logs():
+    """লগ ফাইলের সর্বশেষ ৫০ লাইন ফ্রন্টএন্ডে পাঠাবে"""
+    if not os.path.exists(LOG_FILE):
+        return {"logs": "No logs found yet. Waiting for bot to start..."}
+    try:
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            # শেষের ৫০ লাইন রিটার্ন করবে
+            return {"logs": "".join(lines[-50:])}
+    except Exception as e:
+        return {"logs": f"Error reading logs: {e}"}
+
 @app.get("/api/action/{command}")
 def control_bot(command: str):
     if command in ["pause", "resume"]:
@@ -124,7 +138,6 @@ def dashboard():
                 .btn-pause { background-color: #d93025; }
                 .btn-resume { background-color: #1e8e3e; }
                 
-                /* Mobile Responsive Input Group */
                 .input-group { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
                 .form-input { padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; flex: 1 1 120px; min-width: 0; }
                 .btn-add { background-color: #1a73e8; color: white; border: none; border-radius: 6px; padding: 10px 20px; font-weight: bold; cursor: pointer; flex: 1 1 auto; }
@@ -135,6 +148,11 @@ def dashboard():
                 .progress-bar-fill { background: linear-gradient(90deg, #1a73e8, #4285f4); height: 100%; width: 0%; transition: width 0.3s ease; }
                 .progress-stats { display: flex; justify-content: space-between; font-size: 12px; color: #5f6368; font-family: monospace; font-weight: bold; }
                 .progress-size { text-align: center; font-size: 11px; color: #80868b; margin-top: 8px; font-family: monospace; }
+                
+                /* Terminal Styles */
+                .terminal-box { background-color: #1e1e1e; color: #00ff00; font-family: 'Courier New', Courier, monospace; font-size: 11px; padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; white-space: pre-wrap; margin-top: 10px; border: 1px solid #333; line-height: 1.4; }
+                .terminal-box::-webkit-scrollbar { width: 8px; }
+                .terminal-box::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
                 
                 ul { list-style-type: none; padding: 0; margin-top: 10px; }
                 li { background: #f8f9fa; border-bottom: 1px solid #e8eaed; padding: 10px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
@@ -178,6 +196,9 @@ def dashboard():
                     <div id="p-size" class="progress-size">0 KB / 0 KB</div>
                 </div>
 
+                <h3>🖥️ Live Console</h3>
+                <div id="log-viewer" class="terminal-box">Loading logs...</div>
+
                 <h3>📂 Configured Folders</h3>
                 <div class="input-group">
                     <input type="text" id="f-name" class="form-input" placeholder="Folder Name">
@@ -193,7 +214,6 @@ def dashboard():
             <script>
                 function sendAction(action) { fetch('/api/action/' + action).then(res => fetchStats()); }
 
-                // --- Smart Size Formatter (Bytes to KB/MB/GB) ---
                 function formatBytes(bytes) {
                     if (bytes === 0) return '0 Bytes';
                     const k = 1024;
@@ -202,30 +222,24 @@ def dashboard():
                     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
                 }
 
-                // --- Smart Speed Formatter (<1MB = KB/s, >1MB = MB/s) ---
                 function formatSpeed(bytesPerSec) {
-                    if (bytesPerSec < 1024 * 1024) {
-                        return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
-                    } else {
-                        return (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s';
-                    }
+                    if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+                    else return (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s';
                 }
 
                 function fetchFolders() {
-                    fetch('/api/config')
-                        .then(res => res.json())
-                        .then(data => {
-                            let listHTML = ''; let count = 0;
-                            let folders = data.folders || {};
-                            for (const [name, topic] of Object.entries(folders)) {
-                                listHTML += `<li>
-                                    <span>📁 <b>${name}</b> <span style="color:#1a73e8; font-size:11px;">(ID: ${topic})</span></span>
-                                    <button onclick="deleteFolder('${name}')" style="background:none; border:none; font-size:16px; cursor:pointer;">🗑️</button>
-                                </li>`;
-                                count++;
-                            }
-                            document.getElementById('folder-list').innerHTML = count > 0 ? listHTML : "<li style='justify-content:center; color:#888;'>No folders added</li>";
-                        });
+                    fetch('/api/config').then(res => res.json()).then(data => {
+                        let listHTML = ''; let count = 0;
+                        let folders = data.folders || {};
+                        for (const [name, topic] of Object.entries(folders)) {
+                            listHTML += `<li>
+                                <span>📁 <b>${name}</b> <span style="color:#1a73e8; font-size:11px;">(ID: ${topic})</span></span>
+                                <button onclick="deleteFolder('${name}')" style="background:none; border:none; font-size:16px; cursor:pointer;">🗑️</button>
+                            </li>`;
+                            count++;
+                        }
+                        document.getElementById('folder-list').innerHTML = count > 0 ? listHTML : "<li style='justify-content:center; color:#888;'>No folders added</li>";
+                    });
                 }
 
                 function addFolder() {
@@ -248,6 +262,21 @@ def dashboard():
                     fetch('/api/folders/' + name, { method: 'DELETE' }).then(() => fetchFolders());
                 }
 
+                function fetchLogs() {
+                    fetch('/api/logs').then(res => res.json()).then(data => {
+                        let logViewer = document.getElementById('log-viewer');
+                        // Check if user is scrolled to the bottom
+                        let isScrolledToBottom = logViewer.scrollHeight - logViewer.clientHeight <= logViewer.scrollTop + 10;
+                        
+                        logViewer.innerText = data.logs;
+                        
+                        // Auto-scroll to bottom if they were already at the bottom
+                        if (isScrolledToBottom) {
+                            logViewer.scrollTop = logViewer.scrollHeight;
+                        }
+                    });
+                }
+
                 function fetchStats() {
                     fetch('/api/stats').then(res => res.json()).then(data => {
                         let statusEl = document.getElementById('bot-status');
@@ -264,7 +293,6 @@ def dashboard():
                             document.getElementById('p-bar').style.width = data.progress.percentage + '%';
                             document.getElementById('p-percent').innerText = data.progress.percentage + '%';
                             
-                            // Applying Smart Formatting here
                             document.getElementById('p-speed').innerText = formatSpeed(data.progress.speed);
                             document.getElementById('p-eta').innerText = data.progress.eta + 's left';
                             document.getElementById('p-size').innerText = formatBytes(data.progress.current) + ' / ' + formatBytes(data.progress.total);
@@ -280,10 +308,14 @@ def dashboard():
 
                 fetchFolders();
                 fetchStats();
-                setInterval(fetchStats, 1000); 
+                fetchLogs(); // Initial log fetch
+                
+                setInterval(fetchStats, 1000); // Stats update fast
+                setInterval(fetchLogs, 2000); // Logs update every 2s
             </script>
         </body>
     </html>
     """
     return html_content
+
 
