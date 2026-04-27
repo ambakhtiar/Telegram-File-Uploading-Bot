@@ -13,12 +13,18 @@ STATE_FILE = os.path.join(PROJECT_DIR, 'state.json')
 PROGRESS_FILE = os.path.join(PROJECT_DIR, 'progress.json')
 CONFIG_FILE = os.path.join(PROJECT_DIR, 'config.json')
 QUEUE_FILE = os.path.join(PROJECT_DIR, 'queue.json')
-LOG_FILE = os.path.join(PROJECT_DIR, 'uploader.log') # লগ ফাইল পাথ যুক্ত করা হলো
+LOG_FILE = os.path.join(PROJECT_DIR, 'uploader.log')
 
-class FolderItem(BaseModel):
+# ================= DATA MODELS =================
+class FolderRule(BaseModel):
     name: str
+    file_type: str
     topic_id: int
 
+class SettingsItem(BaseModel):
+    auto_delete: bool
+
+# ================= HELPER FUNCTIONS =================
 def get_state():
     if not os.path.exists(STATE_FILE): return "running"
     try:
@@ -43,11 +49,12 @@ def get_db_stats():
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM uploads")
         total = cursor.fetchone()[0]
-        cursor.execute("SELECT file_name, uploaded_at FROM uploads ORDER BY uploaded_at DESC LIMIT 5")
+        cursor.execute("SELECT file_name, uploaded_at, message_link FROM uploads ORDER BY uploaded_at DESC LIMIT 5")
         recent = cursor.fetchall()
         conn.close()
-        return total, [{"name": r[0], "time": r[1]} for r in recent]
-    except: return 0, []
+        return total, [{"name": r[0], "time": r[1], "link": r[2] if len(r)>2 else None} for r in recent]
+    except Exception as e: 
+        return 0, []
 
 def get_progress():
     try:
@@ -59,6 +66,7 @@ def get_queue_count():
         with open(QUEUE_FILE, 'r') as f: return json.load(f).get("count", 0)
     except: return 0
 
+# ================= API ENDPOINTS =================
 @app.get("/api/stats")
 def stats():
     total, recent = get_db_stats()
@@ -72,16 +80,14 @@ def stats():
 
 @app.get("/api/logs")
 def get_logs():
-    """লগ ফাইলের সর্বশেষ ৫০ লাইন ফ্রন্টএন্ডে পাঠাবে"""
     if not os.path.exists(LOG_FILE):
-        return {"logs": "No logs found yet. Waiting for bot to start..."}
+        return {"logs": "Waiting for bot logs..."}
     try:
         with open(LOG_FILE, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-            # শেষের ৫০ লাইন রিটার্ন করবে
             return {"logs": "".join(lines[-50:])}
     except Exception as e:
-        return {"logs": f"Error reading logs: {e}"}
+        return {"logs": f"Error: {e}"}
 
 @app.get("/api/action/{command}")
 def control_bot(command: str):
@@ -94,10 +100,20 @@ def control_bot(command: str):
 @app.get("/api/config")
 def get_config_api(): return read_config()
 
-@app.post("/api/folders")
-def add_folder(item: FolderItem):
+# --- Settings & Folders Endpoints ---
+@app.post("/api/settings")
+def update_settings(item: SettingsItem):
     config = read_config()
-    config.setdefault("folders", {})[item.name] = item.topic_id
+    config["auto_delete_after_upload"] = item.auto_delete
+    write_config(config)
+    return {"status": "success"}
+
+@app.post("/api/folders")
+def add_folder(item: FolderRule):
+    config = read_config()
+    folders = config.setdefault("folders", {})
+    if item.name not in folders: folders[item.name] = {}
+    folders[item.name][item.file_type] = item.topic_id
     write_config(config)
     return {"status": "success"}
 
@@ -110,6 +126,7 @@ def delete_folder(folder_name: str):
         return {"status": "success"}
     return {"error": "Not found"}
 
+# ================= WEB DASHBOARD =================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     html_content = """
@@ -128,19 +145,31 @@ def dashboard():
                 .running { background-color: #e6f4ea; color: #1e8e3e; }
                 .paused { background-color: #fce8e6; color: #d93025; }
                 
-                .stats-container { display: flex; justify-content: space-between; background: #f8f9fa; padding: 10px 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #e8eaed; }
+                .stats-container { display: flex; justify-content: space-between; background: #f8f9fa; padding: 10px 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #e8eaed; }
                 .stat-box { text-align: center; width: 48%; }
                 .stat-value { font-size: 18px; font-weight: bold; }
                 .stat-label { font-size: 11px; color: #5f6368; text-transform: uppercase; letter-spacing: 0.5px; }
                 
+                /* Settings Toggle */
+                .settings-bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px; background: #fff8e1; border: 1px solid #ffecb3; border-radius: 8px; margin-bottom: 20px; }
+                .settings-text { font-size: 13px; font-weight: bold; color: #b08d00; }
+                .switch { position: relative; display: inline-block; width: 40px; height: 22px; }
+                .switch input { opacity: 0; width: 0; height: 0; }
+                .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 22px; }
+                .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+                input:checked + .slider { background-color: #1a73e8; }
+                input:checked + .slider:before { transform: translateX(18px); }
+
                 .btn { padding: 12px; border: none; border-radius: 6px; color: white; cursor: pointer; margin: 5px; font-weight: bold; width: 47%; transition: 0.2s; }
                 .btn:active { opacity: 0.8; }
                 .btn-pause { background-color: #d93025; }
                 .btn-resume { background-color: #1e8e3e; }
                 
-                .input-group { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
-                .form-input { padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; flex: 1 1 120px; min-width: 0; }
-                .btn-add { background-color: #1a73e8; color: white; border: none; border-radius: 6px; padding: 10px 20px; font-weight: bold; cursor: pointer; flex: 1 1 auto; }
+                /* Modern Stacked Input Form for Mobile */
+                .form-wrapper { background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e8eaed; margin-bottom: 15px; }
+                .form-input { padding: 12px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; width: 100%; box-sizing: border-box; }
+                .row-group { display: flex; gap: 10px; margin-top: 10px; }
+                .btn-add { background-color: #1a73e8; color: white; border: none; border-radius: 6px; padding: 12px; font-weight: bold; cursor: pointer; width: 100%; margin-top: 10px; font-size: 14px; }
                 
                 .progress-container { margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 8px; border: 1px solid #e8eaed; display: none; }
                 .file-name { font-weight: bold; font-size: 14px; margin-bottom: 8px; word-break: break-all; color: #1a73e8; }
@@ -149,8 +178,8 @@ def dashboard():
                 .progress-stats { display: flex; justify-content: space-between; font-size: 12px; color: #5f6368; font-family: monospace; font-weight: bold; }
                 .progress-size { text-align: center; font-size: 11px; color: #80868b; margin-top: 8px; font-family: monospace; }
                 
-                /* Terminal Styles */
-                .terminal-box { background-color: #1e1e1e; color: #00ff00; font-family: 'Courier New', Courier, monospace; font-size: 11px; padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; white-space: pre-wrap; margin-top: 10px; border: 1px solid #333; line-height: 1.4; }
+                /* Terminal Box with WHITE text */
+                .terminal-box { background-color: #1e1e1e; color: #ffffff; font-family: 'Courier New', Courier, monospace; font-size: 11px; padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; white-space: pre-wrap; margin-top: 10px; border: 1px solid #333; line-height: 1.4; }
                 .terminal-box::-webkit-scrollbar { width: 8px; }
                 .terminal-box::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
                 
@@ -158,6 +187,7 @@ def dashboard():
                 li { background: #f8f9fa; border-bottom: 1px solid #e8eaed; padding: 10px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
                 li:last-child { border-bottom: none; }
                 .time { font-size: 11px; color: #80868b; }
+                .msg-link { color: #1a73e8; text-decoration: none; font-weight: bold; font-size: 12px; padding-left: 10px; }
             </style>
         </head>
         <body>
@@ -179,6 +209,14 @@ def dashboard():
                         <div class="stat-label">In Queue</div>
                     </div>
                 </div>
+
+                <div class="settings-bar">
+                    <span class="settings-text">🗑️ Auto-delete files after upload</span>
+                    <label class="switch">
+                        <input type="checkbox" id="auto-del-toggle" onchange="toggleAutoDelete()">
+                        <span class="slider"></span>
+                    </label>
+                </div>
                 
                 <div style="text-align: center; display: flex; justify-content: space-between;">
                     <button onclick="sendAction('pause')" class="btn btn-pause">⏸️ PAUSE</button>
@@ -199,11 +237,18 @@ def dashboard():
                 <h3>🖥️ Live Console</h3>
                 <div id="log-viewer" class="terminal-box">Loading logs...</div>
 
-                <h3>📂 Configured Folders</h3>
-                <div class="input-group">
-                    <input type="text" id="f-name" class="form-input" placeholder="Folder Name">
-                    <input type="number" id="f-topic" class="form-input" placeholder="Topic ID">
-                    <button onclick="addFolder()" class="btn-add">➕ Add</button>
+                <h3>📂 Smart Folders</h3>
+                <div class="form-wrapper">
+                    <input type="text" id="f-name" class="form-input" placeholder="Folder Name (e.g. Camera)">
+                    <div class="row-group">
+                        <select id="f-type" class="form-input" style="flex: 1.2;">
+                            <option value="all">All Files</option>
+                            <option value="image">Images Only</option>
+                            <option value="video">Videos Only</option>
+                        </select>
+                        <input type="number" id="f-topic" class="form-input" placeholder="Topic ID" style="flex: 0.8;">
+                    </div>
+                    <button onclick="addFolder()" class="btn-add">➕ Add Rule</button>
                 </div>
                 <ul id="folder-list"><li>Loading...</li></ul>
 
@@ -227,53 +272,64 @@ def dashboard():
                     else return (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s';
                 }
 
-                function fetchFolders() {
+                function toggleAutoDelete() {
+                    let isChecked = document.getElementById('auto-del-toggle').checked;
+                    fetch('/api/settings', {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({auto_delete: isChecked})
+                    });
+                }
+
+                function fetchFoldersAndSettings() {
                     fetch('/api/config').then(res => res.json()).then(data => {
+                        // Update toggle switch
+                        document.getElementById('auto-del-toggle').checked = data.auto_delete_after_upload || false;
+                        
+                        // Update folder list
                         let listHTML = ''; let count = 0;
                         let folders = data.folders || {};
-                        for (const [name, topic] of Object.entries(folders)) {
+                        for (const [name, rules] of Object.entries(folders)) {
+                            let ruleText = Object.entries(rules).map(([t, id]) => `<span style="background:#e8eaed; padding:2px 5px; border-radius:4px; font-size:10px; color:#555;">${t}: ${id}</span>`).join(" ");
                             listHTML += `<li>
-                                <span>📁 <b>${name}</b> <span style="color:#1a73e8; font-size:11px;">(ID: ${topic})</span></span>
+                                <div style="display:flex; flex-direction:column;">
+                                    <span>📁 <b>${name}</b></span>
+                                    <div style="margin-top:4px;">${ruleText}</div>
+                                </div>
                                 <button onclick="deleteFolder('${name}')" style="background:none; border:none; font-size:16px; cursor:pointer;">🗑️</button>
                             </li>`;
                             count++;
                         }
-                        document.getElementById('folder-list').innerHTML = count > 0 ? listHTML : "<li style='justify-content:center; color:#888;'>No folders added</li>";
+                        document.getElementById('folder-list').innerHTML = count > 0 ? listHTML : "<li style='justify-content:center; color:#888;'>No rules added</li>";
                     });
                 }
 
                 function addFolder() {
                     let name = document.getElementById('f-name').value.trim();
+                    let type = document.getElementById('f-type').value;
                     let topic = parseInt(document.getElementById('f-topic').value);
                     if(!name || isNaN(topic)) { alert("Invalid input!"); return; }
                     
                     fetch('/api/folders', {
                         method: 'POST', headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({name: name, topic_id: topic})
+                        body: JSON.stringify({name: name, file_type: type, topic_id: topic})
                     }).then(() => {
                         document.getElementById('f-name').value = '';
                         document.getElementById('f-topic').value = '';
-                        fetchFolders(); 
+                        fetchFoldersAndSettings(); 
                     });
                 }
 
                 function deleteFolder(name) {
-                    if(!confirm(`Remove '${name}'?`)) return;
-                    fetch('/api/folders/' + name, { method: 'DELETE' }).then(() => fetchFolders());
+                    if(!confirm(`Remove all rules for '${name}'?`)) return;
+                    fetch('/api/folders/' + name, { method: 'DELETE' }).then(() => fetchFoldersAndSettings());
                 }
 
                 function fetchLogs() {
                     fetch('/api/logs').then(res => res.json()).then(data => {
                         let logViewer = document.getElementById('log-viewer');
-                        // Check if user is scrolled to the bottom
                         let isScrolledToBottom = logViewer.scrollHeight - logViewer.clientHeight <= logViewer.scrollTop + 10;
-                        
                         logViewer.innerText = data.logs;
-                        
-                        // Auto-scroll to bottom if they were already at the bottom
-                        if (isScrolledToBottom) {
-                            logViewer.scrollTop = logViewer.scrollHeight;
-                        }
+                        if (isScrolledToBottom) logViewer.scrollTop = logViewer.scrollHeight;
                     });
                 }
 
@@ -300,18 +356,25 @@ def dashboard():
 
                         let listHTML = '';
                         data.recent_uploads.forEach(file => {
-                            listHTML += `<li><span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 65%;">📄 ${file.name}</span><span class="time">${file.time}</span></li>`;
+                            let linkHtml = file.link ? `<a href="${file.link}" target="_blank" class="msg-link">🔗 Link</a>` : '';
+                            listHTML += `<li>
+                                <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 55%;">📄 ${file.name}</span>
+                                <div style="display:flex; align-items:center;">
+                                    <span class="time">${file.time}</span>
+                                    ${linkHtml}
+                                </div>
+                            </li>`;
                         });
                         document.getElementById('recent-list').innerHTML = listHTML || "<li style='justify-content:center; color:#888;'>No files yet</li>";
                     });
                 }
 
-                fetchFolders();
+                fetchFoldersAndSettings();
                 fetchStats();
-                fetchLogs(); // Initial log fetch
+                fetchLogs(); 
                 
-                setInterval(fetchStats, 1000); // Stats update fast
-                setInterval(fetchLogs, 2000); // Logs update every 2s
+                setInterval(fetchStats, 1000); 
+                setInterval(fetchLogs, 2000); 
             </script>
         </body>
     </html>

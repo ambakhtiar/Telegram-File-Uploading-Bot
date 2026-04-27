@@ -10,7 +10,6 @@ from datetime import datetime
 from telethon import TelegramClient, errors
 from dotenv import load_dotenv
 
-# ================= INITIALIZATION =================
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(PROJECT_DIR, '.env'))
 
@@ -25,21 +24,22 @@ STATE_FILE = os.path.join(PROJECT_DIR, 'state.json')
 CONFIG_FILE = os.path.join(PROJECT_DIR, 'config.json')
 LOG_FILE = os.path.join(PROJECT_DIR, 'uploader.log')
 PROGRESS_FILE = os.path.join(PROJECT_DIR, 'progress.json')
-QUEUE_FILE = os.path.join(PROJECT_DIR, 'queue.json') # নতুন কিউ ট্র্যাকিং ফাইল
+QUEUE_FILE = os.path.join(PROJECT_DIR, 'queue.json')
 
 MAX_CONCURRENT_UPLOADS = 1 
 DELAY_BETWEEN_UPLOADS  = 1.5
 UPLOAD_RETRY_LIMIT     = 3
-SCAN_INTERVAL          = 3 # ইন্সট্যান্ট ফিল দেওয়ার জন্য ৩ সেকেন্ড করা হলো
+SCAN_INTERVAL          = 3
 
-# ================= LOGGING SETUP =================
+IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.svg', '.gif']
+VIDEO_EXTS = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.flv']
+
 class SpacedFormatter(logging.Formatter):
     def format(self, record): return f"\n{super().format(record)}"
 
 logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(LOG_FILE, encoding='utf-8'), logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-# ================= CONFIG & STATE MANAGER =================
 def get_config():
     try:
         with open(CONFIG_FILE, 'r') as f: return json.load(f)
@@ -61,25 +61,29 @@ def update_queue_count(count):
         with open(QUEUE_FILE, 'w') as f: json.dump({"count": count}, f)
     except: pass
 
-# ================= DATABASE MANAGER =================
 class Database:
     def __init__(self, db_path):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute('''CREATE TABLE IF NOT EXISTS uploads 
             (file_hash TEXT PRIMARY KEY, file_name TEXT, file_path TEXT, topic_id INTEGER, uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        # --- Database Migration: Add message_link column if not exists ---
+        try:
+            self.conn.execute("ALTER TABLE uploads ADD COLUMN message_link TEXT")
+        except sqlite3.OperationalError:
+            pass # Column already exists
         self.conn.commit()
 
     def is_uploaded(self, file_hash):
         return bool(self.conn.execute("SELECT 1 FROM uploads WHERE file_hash=?", (file_hash,)).fetchone())
 
-    def mark_uploaded(self, file_hash, file_name, file_path, topic_id):
-        self.conn.execute("INSERT INTO uploads (file_hash, file_name, file_path, topic_id) VALUES (?,?,?,?)",
-                          (file_hash, file_name, file_path, topic_id))
+    def mark_uploaded(self, file_hash, file_name, file_path, topic_id, message_link=None):
+        self.conn.execute("INSERT OR REPLACE INTO uploads (file_hash, file_name, file_path, topic_id, message_link) VALUES (?,?,?,?,?)",
+                          (file_hash, file_name, file_path, topic_id, message_link))
         self.conn.commit()
 
     def close(self): self.conn.close()
 
-# ================= UTILITIES =================
 def generate_file_hash(file_path):
     try:
         stats = os.stat(file_path)
@@ -117,30 +121,39 @@ def format_metadata(file_name, file_path, stats):
     caption += f"\n\n🏷️ {hashtag}"
     return caption
 
-# ================= SCANNER =================
 def scan_and_sort_files(db):
     files_to_upload = []
     config = get_config()
     folder_map = config.get("folders", {})
 
-    for folder_name, topic_id in folder_map.items():
+    for folder_name, rules in folder_map.items():
         folder_path = os.path.join(BASE_DIR, folder_name)
         if not os.path.exists(folder_path): continue
             
         for root, _, files in os.walk(folder_path):
             for file in files:
                 full_path = os.path.join(root, file)
+                
+                # --- Smart Type Routing ---
+                ext = os.path.splitext(file)[1].lower()
+                if ext in IMAGE_EXTS: f_type = "image"
+                elif ext in VIDEO_EXTS: f_type = "video"
+                else: f_type = "other"
+
+                topic_id = rules.get(f_type) or rules.get("all")
+                if not topic_id: continue # এই টাইপের জন্য কোনো রুল সেট করা নেই
+                # --------------------------
+
                 file_hash, stats = generate_file_hash(full_path)
                 if file_hash and not db.is_uploaded(file_hash):
                     files_to_upload.append({
-                        'folder_name': folder_name, # ফোল্ডারের নাম সেভ রাখা হলো
+                        'folder_name': folder_name,
                         'path': full_path, 'name': file, 'hash': file_hash,
                         'mtime': stats.st_mtime, 'stats': stats, 'topic_id': topic_id
                     })
     files_to_upload.sort(key=lambda x: x['mtime'])
     return files_to_upload
 
-# ================= UPLOADER CORE =================
 async def upload_worker(name, client, db, queue, queued_hashes):
     while True:
         try:
@@ -152,13 +165,12 @@ async def upload_worker(name, client, db, queue, queued_hashes):
             item = await queue.get()
             config = get_config()
             
-            # --- Smart Drop Logic (Instant Delete) ---
+            # Smart Drop Logic
             if item['folder_name'] not in config.get("folders", {}):
                 queued_hashes.discard(item['hash'])
                 queue.task_done()
                 update_queue_count(len(queued_hashes))
-                continue # ফোল্ডার কনফিগে না থাকলে ফাইল সাথে সাথে ড্রপ করে দেবে
-            # ----------------------------------------
+                continue 
 
             if not os.path.exists(item['path']):
                 logger.warning(f"[{name}] 👻 Skipped Ghost File: {item['name']}")
@@ -174,14 +186,14 @@ async def upload_worker(name, client, db, queue, queued_hashes):
                 now = time.time()
                 elapsed = now - start_time
                 if elapsed == 0: elapsed = 0.1
-                speed = current / elapsed  # Raw bytes per second
+                speed = current / elapsed 
                 percentage = (current / total) * 100
                 eta = (total - current) / speed if speed > 0 else 0
                 
                 update_progress({
                     "status": "uploading", "file_name": item['name'],
                     "current": current, "total": total, "percentage": round(percentage, 1),
-                    "speed": speed, "eta": round(eta) # Raw speed পাঠানো হচ্ছে
+                    "speed": speed, "eta": round(eta)
                 })
 
             for attempt in range(1, UPLOAD_RETRY_LIMIT + 1):
@@ -189,13 +201,17 @@ async def upload_worker(name, client, db, queue, queued_hashes):
                     logger.info(f"[{name}] 🚀 Uploading: {item['name']}")
                     start_time = time.time()
                     
-                    await client.send_file(
+                    msg = await client.send_file(
                         GROUP_ID, item['path'], caption=caption,
                         reply_to=item['topic_id'], force_document=True,
                         progress_callback=progress_callback
                     )
                     
-                    db.mark_uploaded(item['hash'], item['name'], item['path'], item['topic_id'])
+                    # --- Generate Message Link ---
+                    group_str = str(GROUP_ID).replace("-100", "")
+                    msg_link = f"https://t.me/c/{group_str}/{item['topic_id']}/{msg.id}"
+                    
+                    db.mark_uploaded(item['hash'], item['name'], item['path'], item['topic_id'], msg_link)
                     logger.info(f"[{name}] ✅ Done: {item['name']}")
                     update_progress({"status": "idle"})
 
@@ -215,12 +231,11 @@ async def upload_worker(name, client, db, queue, queued_hashes):
                     
             queued_hashes.discard(item['hash'])
             queue.task_done()
-            update_queue_count(len(queued_hashes)) # আপলোড শেষে কিউ আপডেট
+            update_queue_count(len(queued_hashes)) 
             
         except asyncio.CancelledError:
             break
 
-# ================= MAIN RUNNER =================
 async def main():
     if not API_ID or not API_HASH or not GROUP_ID:
         logger.error("❌ Missing variables in .env file! Please check.")
@@ -239,7 +254,6 @@ async def main():
     queue = asyncio.Queue()
     queued_hashes = set()
 
-    # --- Background Rescanner Task ---
     async def rescanner_loop():
         while True:
             if get_current_state() == "running":
@@ -256,7 +270,6 @@ async def main():
             await asyncio.sleep(SCAN_INTERVAL)
             
     rescanner_task = asyncio.create_task(rescanner_loop())
-    # ---------------------------------
 
     workers = [asyncio.create_task(upload_worker(f"Worker-{i+1}", client, db, queue, queued_hashes)) for i in range(MAX_CONCURRENT_UPLOADS)]
     loop = asyncio.get_running_loop()
