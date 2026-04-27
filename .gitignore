@@ -1,0 +1,18 @@
+# Security & Credentials 
+.env
+backup_session.session
+backup_session.session-journal
+
+# Database & Logs (local data)
+uploads.db
+uploader.log
+
+# Dynamic State Files (auto update file)
+progress.json
+queue.json
+state.json
+config.json
+
+# Python Bytecode (unnecessary cache file)
+__pycache__/
+
