@@ -265,6 +265,7 @@ def dashboard():
                     <div class="progress-stats">
                         <span id="p-percent">0%</span><span id="p-speed" style="color: #1e8e3e;">0 KB/s</span><span id="p-eta">0s left</span>
                     </div>
+                    <div id="p-size" style="text-align: center; font-size: 11px; color: #80868b; margin-top: 8px; font-family: monospace;">0 Bytes / 0 Bytes</div>
                 </div>
 
                 <h3>🖥️ Live Console</h3>
@@ -492,6 +493,7 @@ def dashboard():
                             document.getElementById('p-bar').style.width = data.progress.percentage + '%';
                             document.getElementById('p-percent').innerText = data.progress.percentage + '%';
                             document.getElementById('p-speed').innerText = formatSpeed(data.progress.speed);
+			    document.getElementById('p-size').innerText = formatBytes(data.progress.current) + ' / ' + formatBytes(data.progress.total);
                         } else { pBox.style.display = 'none'; }
 
                         let listHTML = '';
