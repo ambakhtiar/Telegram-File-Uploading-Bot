@@ -1,8 +1,12 @@
-GNU nano 9.0         config.json
+GNU nano 9.0 config.json
 {
-    "auto_delete_after_upload": false,
+    "auto_delete_after_upload": fals>
     "folders": {
-        "Telegram_Topic_Name": 2  #Telegram_Topic_ID
-	# TelegramTop8c Name and Folder Name must be match
+        "Camera": {
+            "image": 2
+        },
+        "Videos": {
+            "video": 2
+        }
     }
 }
